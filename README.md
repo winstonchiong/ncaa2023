@@ -1,1 +1,1 @@
-# ncaa2023
+Here's code for managing a tournament pool for March Madness 2023
