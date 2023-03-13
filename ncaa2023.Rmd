@@ -1,0 +1,545 @@
+---
+title: "NCAA brackets"
+output: html_document
+---
+
+last updated:
+```{r timestamp, echo=FALSE, results='asis'}
+# prerequisites for this script: 
+#
+# - "brackets.Rda" file, created using the script import-brackets.R from excel 
+#   files filled out using the drop-downs. The dataframe brackets_df should have 
+#   68 columns; columns 1:4 represent the first 4 games, columns 5:36 represent 
+#   the first round (winners go to round of 32), columns 37:52 represent round 2
+#   (winnders are sweet 16), columns 53:60 are the elite 8, columns 61:64 are 
+#   the final 4, columns 65:66 are the finalists, column 67 is the champion, and 
+#   column 68 is the guess for the total score. 
+#
+# - "results_df.Rda" file. This contains a dataframe results_df with 1 row and 
+#   68 columns, same column names as the brackets_df dataframe. Note that empty 
+#   entries (games not played yet) should be NAs rather than blank, and those 
+#   columns should be in character class.
+#
+# - "empty_bracket_df.csv" file. This file should contain a column headed "seed," 
+#   another column "school," and a last column "rating538" with the power rating 
+#   from fivethirtyeight.com. It can skip the last column but the estimates won't 
+#   be as good. Teams/seeds should be listed in the same order as they would 
+#   appear in the brackets (running down left of page and then down right of 
+#   page), except that for the play-in first 4 games, the teams playing for a 
+#   given seed (e.g., 16 or 11) should be listed consecutively in the space for 
+#   that seed (e.g., after 1 or after 6). 
+
+# 1. to use this script, go to /var/www/html and open the file "results_df.Rda"
+#    UPDATE: the script is now self-updating
+# 2. then in Console type "setwd('/var/www/html/')" (just type the single-quotes, 
+#    not the double) and hit return
+# 3. in Environment you can double-click "results_df" to see what's there 
+#    already, or in Console you can type "results_df" (don't type the double 
+#    quotes). 
+#    - first4_1 thru first4_4 are the winners of the First Four games
+#    - rdof32_1 thru rdof32_32 are the winners of the first round, where the 
+#      order starts at the top left of the bracket, goes down the left side, 
+#      continues at the top right, and goes down the right side
+#    - and so on for sweet16, elite8, final4, finals and champion
+# 4. to update the results, use the following as an example of what to type:
+#      "results_df$rdof32_1 <- 'Gonzaga'"" (then return, don't type double quotes)
+#    here, the term after the dollar ($) sign is the space for that winner, 
+#    and you have to put the team name in single quotes and spell it exactly 
+#    as it's spelled in the brackets, with no extra spaces. 
+#    or, you can use the entry in the previous round to make sure your spelling 
+#    doesn't change, e.g. if Gonzaga wins in the second round you could go: 
+#      "results_df$sweet16_1 <- results_df$rdof32_1"
+#    which means that the first team in the Sweet 16 is the same as the first 
+#    team in the Round of 32. 
+# 5. then type "save(results_df, file='results_df.Rda')"
+#    UPDATE AGAIN: no longer necessary
+# 6. then click "Knit" up above this screen
+
+
+Sys.time()
+```
+
+
+```{r setup, include=FALSE}
+# this loads things we need to run the program
+knitr::opts_chunk$set(echo = TRUE)
+# knitr::opts_knit$set(root.dir = 'D:/scrap2/raspberrypi/ncaa2022/') 
+knitr::opts_knit$set(root.dir = '/var/www/html/') 
+library(tidyverse)
+library(knitr)
+library(readr)
+library(jsonlite)
+
+# now we load everyone's brackets and the bracket_results that were just updated
+load("brackets.Rda") # this filename can be edited if multiple tourneys are run in same folder
+load("results_df.Rda")
+empty_bracket_df <- read_csv("empty_bracket_df.csv")
+
+empty_bracket_dups <- empty_bracket_df %>% mutate(dups = (seed == lead(seed)), .keep = "none")
+dups <- which(empty_bracket_dups$dups) # find indices of first of duplicate rows
+```
+
+
+```{r update, echo=FALSE, warning=FALSE}
+
+find_closest_name <- function(target_name, namelist) {
+    ed_dist <- as_tibble(matrix(drop(attr(adist(target_name, namelist, 
+                                                ignore.case = TRUE, 
+                                                counts = TRUE), 
+                                          "counts")), ncol=3)) %>%
+      transmute(score = (.[[1]] + .[[2]] + .[[3]])) # don't penalize deletions .[[2]] less
+    ed_dist <- as.matrix(ed_dist, nrow=1)
+    best <- which(ed_dist == min(ed_dist))[1] # [1] breaks ties arbitrarily
+}
+
+con <- url("http://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard", "rb")
+raw_espn_json_now <- fromJSON(con, simplifyVector = FALSE)
+
+# build up tournament calendar, if doesn't exist already - nest inside of if-statement for calendar_df.Rda
+
+if (file.exists("calendar_df.Rda")) {
+  load("calendar_df.Rda")
+} else {
+  datelist <- list()
+  for (i in 1:length(raw_espn_json_now[["leagues"]][[1]][["calendar"]])) {
+    url_loop <- paste("http://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=", 
+                      str_replace_all(strsplit(raw_espn_json_now[["leagues"]][[1]][["calendar"]][[i]],
+                                               "T")[[1]][1], 
+                                      "-", 
+                                      ""), 
+                      sep = "")
+    con <- url(url_loop, "rb")
+    raw_espn_json_loop <- fromJSON(con, simplifyVector = FALSE)
+    if (!is_empty(raw_espn_json_loop[["events"]])) {
+      if (!is_empty(raw_espn_json_loop[["events"]][[1]][["competitions"]][[1]][["notes"]])) {
+        if (str_split(raw_espn_json_loop[["events"]][[1]][["competitions"]][[1]][["notes"]][[1]][["headline"]], 
+                    " - ")[[1]][1] == "Men's Basketball Championship") {
+          calendar_num <- i
+          date <- strsplit(raw_espn_json_loop[["leagues"]][[1]][["calendar"]][[i]],"T")[[1]][1]
+          espn_tag <- tail(str_split(raw_espn_json_loop[["events"]][[1]][["competitions"]][[1]][["notes"]][[1]][["headline"]], 
+                                     " - ")[[1]],1)
+          results_tag <- case_when (
+            espn_tag == "First Four" ~ "first4", 
+            espn_tag == "1st Round" ~  "rdof32", 
+            espn_tag == "2nd Round" ~ "sweet16", 
+            espn_tag == "Sweet 16" ~ "elite8", 
+            espn_tag == "Elite 8" ~ "final4", 
+            espn_tag == "Final Four" ~ "finals",
+            espn_tag == "National Championship" ~ "champion"
+          )
+          datelist[[length(datelist) + 1]] <- c(calendar_num, date, espn_tag, results_tag)
+        }
+      }
+    } 
+  }
+  calendar_df <- data.frame(do.call("rbind",datelist)) %>%
+    rename(calendar_num = X1, date = X2, espn_tag = X3, results_tag = X4)
+  
+  save(calendar_df, file = "calendar_df.Rda", version = 2)
+}
+
+# check if results need to be updated
+if (which(is.na(results_df))[1] < 68) { # check - is whole bracket full already? then stop
+  #  most recent date w results: which.max(-1/as.numeric(difftime(as.Date(calendar_df[,2]), Sys.Date())) - .001)
+  if (which(calendar_df$results_tag == str_split(names(results_df)[which(is.na(results_df))[1]], 
+                                         "_")[[1]][1])[1] <= # is the first level with an empty <=
+      which.max(-1/as.numeric(difftime(as.Date(calendar_df$date), Sys.Date()) - .001)))  { # most recent level w results
+    for (i in which(calendar_df$results_tag == str_split(names(results_df)[which(is.na(results_df))[1]], "_")[[1]][1])[1]:which.max(-1/as.numeric(difftime(as.Date(calendar_df$date), Sys.Date()) - .001))) {
+      url_loop <- paste("http://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=",str_replace_all(calendar_df$date[i], "-", ""), sep = "")
+      con <- url(url_loop, "rb")
+      raw_espn_json_loop <- fromJSON(con, simplifyVector = FALSE)
+      for (e in 1:length(raw_espn_json_loop[["events"]])) {
+        if (raw_espn_json_loop[["events"]][[e]][["competitions"]][[1]][["status"]][["type"]][["completed"]]){
+          if (raw_espn_json_loop[["events"]][[e]][["competitions"]][[1]][["competitors"]][[1]][["winner"]]) {
+            espn_winner <- raw_espn_json_loop[["events"]][[e]][["competitions"]][[1]][["competitors"]][[1]][["team"]][["location"]]
+          } else { # or team 2 has to be the winnder
+            espn_winner <- raw_espn_json_loop[["events"]][[e]][["competitions"]][[1]][["competitors"]][[2]][["team"]][["location"]]
+          }
+          if (i <= 2) { # is this a first four game?
+            results_winner <- empty_bracket_df$school[c(dups,dups+1)][find_closest_name(espn_winner,empty_bracket_df$school[c(dups, dups+1)])]
+            if (is.na(results_df[1,which(matrix(empty_bracket_df$school[c(dups, dups+1)], 
+                                                nrow = 2, byrow = TRUE) == results_winner, 
+                                         arr.ind = T)[2]])) {
+              results_df[1,which(matrix(empty_bracket_df$school[c(dups, dups+1)], 
+                                        nrow = 2, byrow = TRUE) == results_winner, 
+                                 arr.ind = T)[2]] <- results_winner
+            }
+          } else if (i <= 4) { # first round game?
+            empty_bracket_tempfix_df <- empty_bracket_df[,1:2]
+            empty_bracket_tempfix_df$school[dups[1]] <- results_df$first4_1
+            empty_bracket_tempfix_df$school[dups[2]] <- results_df$first4_2
+            empty_bracket_tempfix_df$school[dups[3]] <- results_df$first4_3
+            empty_bracket_tempfix_df$school[dups[4]] <- results_df$first4_4
+            empty_bracket_tempfix_df <- empty_bracket_tempfix_df[-c(dups[1]+1, dups[2]+1, dups[3]+1, dups[4]+1),]
+            results_winner <- empty_bracket_tempfix_df$school[find_closest_name(espn_winner,
+                                                                                empty_bracket_tempfix_df$school)]
+            if (is.na(results_df[1, 4 + (which(empty_bracket_tempfix_df$school == results_winner) + 1) %/% 2])) {
+              results_df[1, 4 + (which(empty_bracket_tempfix_df$school == results_winner) + 1) %/% 2] <- results_winner
+            }
+          } else {
+            if (i <= 11) {
+              lastround <- results_df %>% select(starts_with(calendar_df$results_tag[i-2]))
+            } else {
+              lastround <- results_df %>% select(starts_with(calendar_df$results_tag[i-1]))
+            }
+            
+            if (is.na(results_df[1,(which(names(results_df) == names(lastround)[find_closest_name(espn_winner, lastround)]) + 69) %/% 2])) {
+              results_df[1,(which(names(results_df) == names(lastround)[find_closest_name(espn_winner, lastround)]) + 69) %/% 2] <- lastround[find_closest_name(espn_winner, lastround)]
+            }
+          }
+        }
+      }
+    }
+  }
+  save(results_df, file = "results_df.Rda", version = 2)
+}
+
+```
+
+## Current tournament results
+
+```{r results, echo=FALSE, warning=FALSE}
+empty_bracket_fix_df <- empty_bracket_df[,1:2]
+
+
+# resolve first four based on whether results are in
+if (is.na(results_df$first4_1) | results_df$first4_1 == '') {
+  empty_bracket_fix_df$school[dups[1]] <- paste(empty_bracket_fix_df$school[dups[1]], 
+                                                empty_bracket_fix_df$school[dups[1]+1], sep='/')
+} else {
+  empty_bracket_fix_df$school[dups[1]] <- results_df$first4_1
+}
+if (is.na(results_df$first4_2) | results_df$first4_2 == '') {
+  empty_bracket_fix_df$school[dups[2]] <- paste(empty_bracket_fix_df$school[dups[2]],
+                                                empty_bracket_fix_df$school[dups[2]+1], sep='/')
+} else {
+  empty_bracket_fix_df$school[dups[2]] <- results_df$first4_2
+}
+if (is.na(results_df$first4_3) | results_df$first4_3 == '') {
+  empty_bracket_fix_df$school[dups[3]] <- paste(empty_bracket_fix_df$school[dups[3]],
+                                                empty_bracket_fix_df$school[dups[3]+1], sep='/')
+} else {
+  empty_bracket_fix_df$school[dups[3]] <- results_df$first4_3
+}
+if (is.na(results_df$first4_4) | results_df$first4_4 == '') {
+  empty_bracket_fix_df$school[dups[4]] <- paste(empty_bracket_fix_df$school[dups[4]],
+                                                empty_bracket_fix_df$school[dups[4]+1], sep='/')
+} else {
+  empty_bracket_fix_df$school[dups[4]] <- results_df$first4_4
+}
+empty_bracket_fix_df <- empty_bracket_fix_df[-c(dups[1]+1, dups[2]+1, dups[3]+1, dups[4]+1),]
+
+# this draws the current results
+  x = c(rep(-6, 32), rep(6, 32), rep(-5, 16), rep(5, 16), rep(-4, 8),
+    rep(4, 8), rep(-3, 4), rep(3, 4), c(-2, -2), 2, 2, -1, 1, 0)
+  y = c(rep(seq(63/64, 1/64, -1/32), 2), rep(seq(31/32, 1/32, -1/16), 2),
+    rep(seq(15/16, 1/16, -1/8), 2), rep(seq(7/8, 1/8, -1/4), 2),
+    rep(c(3/4, 1/4), 2), 3/5, 2/5, 1/2)
+  graphics::par(mar = c(0, 0, 0, 0))
+  graphics::plot(NA, xlim = c(-7, 7), ylim = 0:1, xlab = '', ylab = '',
+    axes = FALSE)
+# horizontal line segments
+  graphics::segments(x - 1/2, y, x + 1/2, y)
+# vertical line segments
+  graphics::segments((x + (x < 0) - 1/2)[seq(1, length(x) - 3, 2)],
+    y[seq(1, length(y) - 3, 2)],
+    (x + (x < 0) - 1/2)[seq(2, length(x) - 3, 2)],
+    y[seq(2, length(y) - 3, 2)])
+# fill in intial seeding
+  graphics::text(x[1:64] - 0.46, y[1:64] + 0.01, paste(empty_bracket_fix_df$seed, empty_bracket_fix_df$school, sep=' '),
+    cex = 0.6, adj = 0)
+# add in the updated results
+  theNAs <- is.na(results_df)
+  graphics::text(x[-(1:64)] - 0.46, y[-(1:64)] + 0.01, results_df[5:67],
+    cex = 0.6, adj = 0)
+```
+
+
+## Leaderboard
+
+```{r make_table, echo=FALSE, warning=FALSE}
+
+leaderboard_df <- rownames_to_column(brackets_df, var = "Name") %>% 
+  select(Name) %>% 
+  mutate(Round_of_32 = 0, Sweet_16 = 0, Elite_8 = 0, Final_4 = 0, Finals = 0, Champion = 0, Score = 0)
+
+truefalse_df <- data.frame(t(rep(NA,67)))
+colorname_df <- data.frame(t(rep('',67)), stringsAsFactors=FALSE)
+for (i in 1:dim(leaderboard_df)[1]) {
+  # compare the actual results to someone's bracket
+  truefalse_df[i,] <- t(results_df[1,1:67] == as.character(brackets_df[i,1:67]))
+  
+  # look at how they did in each round
+  leaderboard_df$Round_of_32[i] <- sum(as.logical(truefalse_df[i,5:36]), na.rm=TRUE)
+  leaderboard_df$Sweet_16[i] <- sum(as.logical(truefalse_df[i,37:52]), na.rm=TRUE)
+  leaderboard_df$Elite_8[i] <- sum(as.logical(truefalse_df[i,53:60]), na.rm=TRUE)
+  leaderboard_df$Final_4[i] <- sum(as.logical(truefalse_df[i,61:64]), na.rm=TRUE)
+  leaderboard_df$Finals[i] <- sum(as.logical(truefalse_df[i,65:66]), na.rm=TRUE)
+  leaderboard_df$Champion[i] <- sum(as.logical(truefalse_df[i,67]), na.rm=TRUE)
+  # multiply how people did by the points for each round to get score
+  leaderboard_df$Score[i] <- sum(leaderboard_df$Round_of_32[i], 
+                                 leaderboard_df$Sweet_16[i]*2, 
+                                 leaderboard_df$Elite_8[i]*4,
+                                 leaderboard_df$Final_4[i]*8,
+                                 leaderboard_df$Finals[i]*16,
+                                 leaderboard_df$Champion[i]*32, 
+                                 na.rm=TRUE)
+  # find the colors to print teams in each bracket
+  for (n in 1:67) {
+    if (!is.na(truefalse_df[i,n])) {
+      if (truefalse_df[i,n]) {
+        colorname_df[i,n] <- 'forestgreen'
+      } else {
+        colorname_df[i,n] <- 'red'
+      }
+    } else {
+      if (is.element('red', colorname_df[i,which(brackets_df[i,] %in% brackets_df[i,n])])) {
+        # have to deal with fact that colorname_df is 4 shorter than brackets_df bc of first four
+        colorname_df[i,n] <- 'magenta'
+      } else {
+        colorname_df[i,n] <- 'black'
+      }
+    }
+  }
+}
+
+```
+
+```{r simulations, echo=FALSE}
+sims_df <- data.frame(results_df, stringsAsFactors = FALSE) %>% 
+  slice(rep(1, times = 1000)) %>% 
+  mutate(winner='', second='', third='')
+
+for (r in 1:1000) {
+  
+  for (c in 1:4) { # code for first four
+    if (is.na(sims_df[r,c])) {
+      team1 <- case_when(
+        c == 1 ~ empty_bracket_df$school[dups[1]],
+        c == 2 ~ empty_bracket_df$school[dups[2]], 
+        c == 3 ~ empty_bracket_df$school[dups[3]], 
+        c == 4 ~ empty_bracket_df$school[dups[4]]
+      )
+      team2 <- case_when(
+        c == 1 ~ empty_bracket_df$school[dups[1]+1],
+        c == 2 ~ empty_bracket_df$school[dups[2]+1], 
+        c == 3 ~ empty_bracket_df$school[dups[3]+1], 
+        c == 4 ~ empty_bracket_df$school[dups[4]+1]
+      )
+      randomnum <- runif(1,0,1) # pick a random number between 0 and 1
+      
+      # rule for results depending on whether 538 rating is available
+      if (!is.na(empty_bracket_df$rating538[empty_bracket_df$school==team1]) & 
+          !is.null(empty_bracket_df$rating538[empty_bracket_df$school==team1]) &
+          !is.na(empty_bracket_df$rating538[empty_bracket_df$school==team2]) & 
+          !is.null(empty_bracket_df$rating538[empty_bracket_df$school==team2])) { #538 rating available
+        
+        prob <- 1/(1+10^(-(empty_bracket_df$rating538[empty_bracket_df$school==team1]-
+                             empty_bracket_df$rating538[empty_bracket_df$school==team2])*30.464/400))
+        
+      } else {
+        prob <- (0.5 + (-0.032*(empty_bracket_df$seed[empty_bracket_df$school==team1] - 
+                                  empty_bracket_df$seed[empty_bracket_df$school==team2])))
+      }
+  
+      if (randomnum < prob) { # factor for better-seeded team likelier to win than lower-seeded
+        sims_df[r,c] <- team1
+      } else {
+        sims_df[r,c] <- team2
+      }
+    }
+  }
+  
+  for (c in c(5:36)) { # code for round of 64
+    if (is.na(sims_df[r,c])) {
+      if ((2*(c-4)-1) %in% c(dups[1], dups[2]-1, dups[3]-2, dups[4]-3)) {
+        team1 <- sims_df[r,which(c(dups[1], dups[2]-1, dups[3]-2, dups[4]-3) == (2*(c-4)-1))]
+      } else { # code above to account for first 4
+        team1 <- empty_bracket_fix_df$school[2*(c-4)-1]
+      }
+      if ((2*(c-4)) %in% c(dups[1], dups[2]-1, dups[3]-2, dups[4]-3)) {
+        team2 <- sims_df[r,which(c(dups[1], dups[2]-1, dups[3]-2, dups[4]-3) == (2*(c-4)))]
+      } else {
+        team2 <- empty_bracket_fix_df$school[2*(c-4)]
+      }
+      
+      randomnum <- runif(1,0,1) # pick a random number between 0 and 1
+      
+      # rule for results depending on whether 538 rating is available
+      if (!is.na(empty_bracket_df$rating538[empty_bracket_df$school==team1]) & 
+          !is.null(empty_bracket_df$rating538[empty_bracket_df$school==team1]) &
+          !is.na(empty_bracket_df$rating538[empty_bracket_df$school==team2]) & 
+          !is.null(empty_bracket_df$rating538[empty_bracket_df$school==team2])) { #538 rating available
+        
+        prob <- 1/(1+10^(-(empty_bracket_df$rating538[empty_bracket_df$school==team1]-
+                             empty_bracket_df$rating538[empty_bracket_df$school==team2])*30.464/400))
+        
+      } else {
+        prob <- (0.5 + (-0.032*(empty_bracket_df$seed[empty_bracket_df$school==team1] - 
+                                  empty_bracket_df$seed[empty_bracket_df$school==team2])))
+      }
+  
+      if (randomnum < prob) { # factor for better-seeded team likelier to win than lower-seeded
+        sims_df[r,c] <- team1
+      } else {
+        sims_df[r,c] <- team2
+      }
+    }
+  }
+  
+  for (c in 37:67) { 
+    if (is.na(sims_df[r,c])) {
+      team1 <- sims_df[r,c-(69-c)]
+      team2 <- sims_df[r,c-(68-c)] # this is how you find the prior round's entries
+      randomnum <- runif(1,0,1) # pick a random number between 0 and 1
+      
+      # rule for results depending on whether 538 rating is available
+      if (!is.na(empty_bracket_df$rating538[empty_bracket_df$school==team1]) & 
+          !is.null(empty_bracket_df$rating538[empty_bracket_df$school==team1]) &
+          !is.na(empty_bracket_df$rating538[empty_bracket_df$school==team2]) & 
+          !is.null(empty_bracket_df$rating538[empty_bracket_df$school==team2])) { #538 rating available
+        
+        prob <- 1/(1+10^(-(empty_bracket_df$rating538[empty_bracket_df$school==team1]-
+                             empty_bracket_df$rating538[empty_bracket_df$school==team2])*30.464/400))
+        
+      } else {
+        prob <- (0.5 + (-0.032*(empty_bracket_df$seed[empty_bracket_df$school==team1] - 
+                                  empty_bracket_df$seed[empty_bracket_df$school==team2])))
+      }
+  
+      if (randomnum < prob) { # factor for better-seeded team likelier to win than lower-seeded
+        sims_df[r,c] <- team1
+      } else {
+        sims_df[r,c] <- team2
+      }
+    }
+  }
+  simleader_df <- rownames_to_column(brackets_df, var = "Name") %>% 
+    select(Name) %>% 
+    mutate(Score = 0)
+  simtf_df <- data.frame(t(rep(NA,63)))
+  for (i in 1:dim(simleader_df)[1]) {
+    # compare the simulated results to someone's bracket
+    simtf_df[i,] <- t(as.character(sims_df[r,5:67]) == as.character(brackets_df[i,5:67]))
+    simleader_df$Score[i] <- sum(sum(as.logical(simtf_df[i,1:32]), na.rm=TRUE), 
+                                 sum(as.logical(simtf_df[i,33:48]), na.rm=TRUE)*2,
+                                 sum(as.logical(simtf_df[i,49:56]), na.rm=TRUE)*4,
+                                 sum(as.logical(simtf_df[i,57:60]), na.rm=TRUE)*8,
+                                 sum(as.logical(simtf_df[i,61:62]), na.rm=TRUE)*16,
+                                 sum(as.logical(simtf_df[i,63]), na.rm=TRUE)*32, na.rm=TRUE)
+  }
+  # how do people place? if same score pick randomly--so, shuffle then arrange
+  simleader_df <- simleader_df %>% sample_n(nrow(.)) %>% arrange(desc(Score))
+  sims_df$winner[r] <- simleader_df$Name[1]
+  sims_df$second[r] <- simleader_df$Name[2]
+  sims_df$third[r] <- simleader_df$Name[3]
+  
+}
+leaderboard_df <- sims_df %>% 
+  group_by(winner) %>% 
+  summarize(count = n()) %>% 
+  right_join(leaderboard_df, by = c("winner" = "Name")) %>% 
+  mutate(Win_Percent = count/10, count = NULL)
+
+leaderboard_df <- sims_df %>% 
+  group_by(second) %>% 
+  summarize(count = n()) %>% 
+  right_join(leaderboard_df, by = c("second" = "winner")) %>% 
+  mutate(p2nd = count/10, count = NULL)
+
+leaderboard_df <- sims_df %>% 
+  group_by(third) %>% 
+  summarize(count = n()) %>% 
+  right_join(leaderboard_df, by = c("third" = "second")) %>% 
+  mutate(p3rd = count/10, count = NULL)
+
+leaderboard_df <- leaderboard_df %>% rename("Name" = "third")
+
+# arrange leaderboard by high score
+
+kable(leaderboard_df %>% arrange(-Score, -Win_Percent), row.names=FALSE)
+
+```
+
+
+
+Win percentage is estimated from a Monte Carlo simulation playing out the 
+bracket 1000 times, based on Fivethirtyeight.com power ratings.
+
+## Brackets
+
+```{r show_brackets, echo=FALSE, results='asis'}
+for (i in 1:dim(brackets_df)[1]) {
+  start_bracket <- empty_bracket_fix_df$school # customize brackets for First 4 choices
+  start_bracket[which(empty_bracket_dups$dups)[1]] <- brackets_df$first4_1[i]
+  start_bracket[which(empty_bracket_dups$dups)[2]-1] <- brackets_df$first4_2[i]
+  start_bracket[which(empty_bracket_dups$dups)[3]-2] <- brackets_df$first4_3[i]
+  start_bracket[which(empty_bracket_dups$dups)[4]-3] <- brackets_df$first4_4[i]
+  
+  start_colors <- rep("black", times=64)
+  start_colors[which(empty_bracket_dups$dups)[1]] <- colorname_df[i,1]
+  start_colors[which(empty_bracket_dups$dups)[2]-1] <- colorname_df[i,2]
+  start_colors[which(empty_bracket_dups$dups)[3]-2] <- colorname_df[i,3]
+  start_colors[which(empty_bracket_dups$dups)[4]-3] <- colorname_df[i,4]
+  
+  cat('\n\n### Bracket for ', row.names(brackets_df)[i], '\n\n')
+  graphics::par(mar = c(0, 0, 0, 0))
+  graphics::plot(NA, xlim = c(-7, 7), ylim = 0:1, xlab = '', ylab = '',
+    axes = FALSE)
+# horizontal line segments
+  graphics::segments(x - 1/2, y, x + 1/2, y)
+# vertical line segments
+  graphics::segments((x + (x < 0) - 1/2)[seq(1, length(x) - 3, 2)],
+    y[seq(1, length(y) - 3, 2)],
+    (x + (x < 0) - 1/2)[seq(2, length(x) - 3, 2)],
+    y[seq(2, length(y) - 3, 2)])
+# fill in intial seeding
+  graphics::text(x[1:64] - 0.46, y[1:64] + 0.01, paste(empty_bracket_fix_df$seed, start_bracket, sep=' '),
+    cex = 0.6, adj = 0, col = as.character(start_colors))
+  graphics::text(x[-(1:64)] - 0.46, y[-(1:64)] + 0.01, 
+                 as.character(brackets_df[i,5:67]),
+                 cex = 0.6, adj = 0, 
+                 col = as.character(colorname_df[i,5:67]))
+}
+
+```
+
+
+
+
+
+## Sample paths to winning
+
+```{r paths, include=FALSE}
+
+paths_df <- sims_df %>% 
+  group_by(winner, final4_1, final4_2, final4_3, final4_4, finals_1, finals_2, champion) %>% 
+  summarize(count = n()) %>% 
+  arrange(winner, desc(count))%>% 
+  group_by(winner) %>% 
+  slice(1)
+```
+
+```{r path_brackets, echo=FALSE, results='asis'}
+for (i in 1:dim(paths_df)[1]) {
+  cat('\n\n### One path for ', paths_df$winner[i], '\n\n')
+  graphics::par(mar = c(0, 0, 0, 0))
+  graphics::plot(NA, xlim = c(-2.5, 2.5), ylim = 0:1, xlab = '', ylab = '',
+    axes = FALSE)
+# horizontal line segments
+  graphics::segments(x - 1/2, y, x + 1/2, y)
+# vertical line segments
+  graphics::segments((x + (x < 0) - 1/2)[seq(1, length(x) - 3, 2)],
+    y[seq(1, length(y) - 3, 2)],
+    (x + (x < 0) - 1/2)[seq(2, length(x) - 3, 2)],
+    y[seq(2, length(y) - 3, 2)])
+# fill in intial seeding
+  graphics::text(x[1:64] - 0.46, y[1:64] + 0.01, paste(empty_bracket_df$seed, empty_bracket_df$school, sep=' '),
+    cex = 0.6, adj = 0)
+  graphics::text(x[-(1:64)] - 0.46, y[-(1:64)] + 0.01, 
+                 c(rep('',56), as.character(paths_df[i,2:8])),
+                 cex = 1.2, adj = c(0,-0.5))
+}
+
+```
+
